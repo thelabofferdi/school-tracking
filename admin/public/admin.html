@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin — localisation scolaire</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; display: flex; min-height: 100vh; }
+      aside { width: 24rem; padding: 1rem; box-sizing: border-box; border-right: 1px solid #e4e4e7; }
+      section { margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px dashed #d4d4d8; }
+      h1 { font-size: 1.1rem; margin: 0 0 0.75rem; }
+      h2 { font-size: 0.85rem; margin: 0 0 0.4rem; text-transform: uppercase; color: #52525b; }
+      label { display: block; font-size: 0.85rem; margin: 0.4rem 0; }
+      input[type='text'],
+      select { width: 100%; padding: 0.4rem; font-size: 0.9rem; box-sizing: border-box; }
+      button { padding: 0.4rem 0.7rem; font-size: 0.85rem; margin: 0.25rem 0.25rem 0 0; }
+      pre { background: #f4f4f5; padding: 0.6rem; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }
+      #map { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>Administration</h1>
+
+      <section>
+        <h2>Accès au Worker</h2>
+        <label>URL du Worker <input type="text" id="workerUrl" placeholder="https://school-tracking-worker.ferdilabspace.workers.dev" /></label>
+        <label>Clé API (x-api-key) <input type="text" id="apiKey" placeholder="cle-de-demo-changez-moi" /></label>
+        <button id="saveCfg">Mémoriser</button>
+      </section>
+
+      <section>
+        <h2>Élèves (XML)</h2>
+        <input type="file" id="file" accept=".xml,text/xml,application/xml" />
+        <button id="importer">Importer le XML</button>
+        <button id="exporter">Exporter le XML</button>
+        <pre id="nbEleves">0 élève(s) en base locale.</pre>
+        <pre id="xmlInfo">Aucun import.</pre>
+      </section>
+
+      <section>
+        <h2>Suivi</h2>
+        <label>Élève <select id="eleve"></select> </label>
+        <label><input type="checkbox" id="auto" checked /> Rafraîchir toutes les 5 s</label>
+        <label><input type="checkbox" id="fit" checked /> Cadrer la carte sur la trace</label>
+        <button id="refresh">Actualiser</button>
+        <pre id="info">Sélectionne un élève.</pre>
+      </section>
+    </aside>
+
+    <div id="map"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      const REFRESH_MS = 5000;
+      const $ = (id) => document.getElementById(id);
+      const store = { workerUrl: 'w_url', apiKey: 'w_key' };
+      const cfg = {
+        workerUrl: (localStorage.getItem(store.workerUrl) || '').replace(/\/+$/, ''),
+        apiKey: localStorage.getItem(store.apiKey) || '',
+      };
+      let eleves = [];
+      let timer = null;
+      let busy = false; // évite d'empiler les rafraîchissements si le Worker répond lentement
+      let marker = null;
+      let ligne = null;
+
+      // Carte Leaflet + tuiles OpenStreetMap (nécessite l'accès internet).
+      const map = L.map('map').setView([6.3654, 2.4183], 14);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+      $('workerUrl').value = cfg.workerUrl;
+      $('apiKey').value = cfg.apiKey;
+      $('saveCfg').onclick = () => {
+        cfg.workerUrl = $('workerUrl').value.trim().replace(/\/+$/, '');
+        cfg.apiKey = $('apiKey').value.trim();
+        localStorage.setItem(store.workerUrl, cfg.workerUrl);
+        localStorage.setItem(store.apiKey, cfg.apiKey);
+        refresh();
+      };
+
+      // ------------------------------------------------------------- élèves ---
+
+      async function loadEleves() {
+        const res = await fetch('/api/eleves');
+        if (!res.ok) throw new Error(`API locale indisponible (${res.status})`);
+        eleves = await res.json();
+
+        const sel = $('eleve');
+        const garde = sel.value;
+        sel.innerHTML = '';
+        for (const e of eleves) {
+          const opt = document.createElement('option');
+          opt.value = e.code; // les positions sont indexées par le code saisi par l'élève, pas par l'id SQLite
+          opt.textContent = `${e.nom} — ${e.classe} (code ${e.code})`;
+          sel.appendChild(opt);
+        }
+        sel.value = eleves.some((e) => e.code === garde) ? garde : (eleves[0]?.code ?? '');
+        $('nbEleves').textContent = `${eleves.length} élève(s) en base locale.`;
+      }
+
+      // -------------------------------------------------------- import/export ---
+
+      $('importer').onclick = async () => {
+        const f = $('file').files[0];
+        if (!f) {
+          $('xmlInfo').textContent = "Choisis d'abord un fichier .xml.";
+          return;
+        }
+        try {
+          // Le fichier est posté tel quel en corps brut : c'est POST /import-xml qui le parse.
+          const res = await fetch('/import-xml', {
+            method: 'POST',
+            headers: { 'content-type': f.type || 'text/xml' },
+            body: await f.text(),
+          });
+          const data = await res.json();
+          $('xmlInfo').textContent = res.ok
+            ? `Import OK : ${data.importes} élève(s)${data.ignores.length ? ` — ignoré(s) : ${data.ignores.join(', ')}` : ''}`
+            : `Import refusé : ${data.error}`;
+          await loadEleves();
+          refresh();
+        } catch (err) {
+          $('xmlInfo').textContent = 'Import impossible : ' + err.message;
+        }
+      };
+
+      $('exporter').onclick = async () => {
+        try {
+          const res = await fetch('/export-xml');
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `export refusé (${res.status})`);
+          }
+          const blob = await res.blob();
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'eleves.xml';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          $('xmlInfo').textContent = 'Export OK : eleves.xml téléchargé.';
+        } catch (err) {
+          $('xmlInfo').textContent = 'Export impossible : ' + err.message;
+        }
+      };
+
+      // ---------------------------------------------- positions XML (DOMParser) ---
+
+      async function fetchWorkerXml(path) {
+        if (!cfg.workerUrl) throw new Error("renseigne l'URL du Worker");
+        const res = await fetch(`${cfg.workerUrl}${path}?format=xml`, { headers: { 'x-api-key': cfg.apiKey } });
+        const body = await res.text();
+        if (!res.ok) {
+          const doc = new DOMParser().parseFromString(body, 'application/xml');
+          throw new Error(doc.querySelector('erreur')?.textContent || `HTTP ${res.status}`);
+        }
+        const doc = new DOMParser().parseFromString(body, 'application/xml');
+        if (doc.querySelector('parsererror')) throw new Error('XML illisible');
+        return doc;
+      }
+
+      const num = (node) => Number(node?.textContent);
+      // <position eleve="1" vide="1"/> => position inconnue.
+      const readPosition = (doc) =>
+        doc.documentElement.getAttribute('vide') ? null : { lat: num(doc.querySelector('lat')), lng: num(doc.querySelector('lng')), date: doc.querySelector('date')?.textContent };
+      const readTrace = (doc) =>
+        [...doc.querySelectorAll('position')]
+          .map((p) => ({ lat: num(p.querySelector('lat')), lng: num(p.querySelector('lng')), date: p.querySelector('date')?.textContent }))
+          .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+
+      // ------------------------------------------------------------ affichage ---
+
+      function clearLayers() {
+        if (marker) map.removeLayer(marker);
+        if (ligne) map.removeLayer(ligne);
+        marker = null;
+        ligne = null;
+      }
+
+      async function refresh() {
+        const code = $('eleve').value;
+        if (!code) {
+          $('info').textContent = 'Aucun élève : importe eleves.xml puis recharge la page.';
+          return;
+        }
+        if (busy) return;
+        busy = true;
+        const e = eleves.find((s) => s.code === code) || {};
+        const q = encodeURIComponent(code);
+        try {
+          const [posDoc, traceDoc] = await Promise.all([fetchWorkerXml(`/position/${q}`), fetchWorkerXml(`/trace/${q}`)]);
+          const pos = readPosition(posDoc);
+          const pts = readTrace(traceDoc);
+
+          clearLayers();
+          if (pos) {
+            marker = L.marker([pos.lat, pos.lng]).addTo(map).bindPopup(`Dernière position<br>${pos.date}`);
+            ligne = L.polyline(pts.map((p) => [p.lat, p.lng]), { color: '#2563eb' }).addTo(map);
+            if ($('fit').checked && pts.length > 1) map.fitBounds(ligne.getBounds(), { padding: [30, 30] });
+            else if (pts.length === 1) map.setView([pts[0].lat, pts[0].lng], 15);
+          }
+          $('info').textContent = [
+            `${e.nom || '(inconnu)'} · ${e.classe || '-'} · code ${code}`,
+            pos ? `Dernière position : ${pos.lat.toFixed(5)}, ${pos.lng.toFixed(5)}` : 'Aucune position connue.',
+            `Trace : ${pts.length} point(s)${pts.length ? ` — ${pts[0].date}` : ''}`,
+            `Vu à ${new Date().toLocaleTimeString()}`,
+          ].join('\n');
+        } catch (err) {
+          $('info').textContent = `Erreur : ${err.message}`;
+        } finally {
+          busy = false;
+        }
+      }
+
+      function setAuto(on) {
+        clearInterval(timer);
+        timer = on ? setInterval(refresh, REFRESH_MS) : null;
+      }
+
+      $('eleve').onchange = () => {
+        clearLayers();
+        $('fit').checked = true;
+        refresh();
+      };
+      $('auto').onchange = (ev) => setAuto(ev.target.checked);
+      $('refresh').onclick = refresh;
+
+      (async () => {
+        try {
+          await loadEleves();
+        } catch (err) {
+          $('xmlInfo').textContent = err.message;
+        }
+        refresh();
+        setAuto($('auto').checked);
+      })();
+    </script>
+  </body>
+</html>

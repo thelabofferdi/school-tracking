@@ -1,0 +1,9 @@
+# Dépendances Node (recréées par `npm install`)
+node_modules/
+
+# Bases SQLite locales (données de test régénérables)
+*.db
+*.db-journal
+
+# Système
+.DS_Store

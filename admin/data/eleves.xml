@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Liste d'élèves de démonstration : à importer dans l'API locale (POST /import-xml). -->
+<eleves>
+  <eleve id="1"><nom>Awa Dossou</nom><classe>CM2</classe><code>A123</code></eleve>
+  <eleve id="2"><nom>Koffi Adjovi</nom><classe>CM2</classe><code>A124</code></eleve>
+  <eleve id="3"><nom>Fatou Soglo</nom><classe>CM1</classe><code>B201</code></eleve>
+  <eleve id="4"><nom>Ibrahim Traoré</nom><classe>CM1</classe><code>B202</code></eleve>
+  <eleve id="5"><nom>Chantal Hounkpatin</nom><classe>CE2</classe><code>C055</code></eleve>
+</eleves>

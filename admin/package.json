@@ -1,0 +1,17 @@
+{
+  "name": "school-tracking-admin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API d'administration locale (liste d'elèves + import/export XML) pour la démo de localisation scolaire",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "fast-xml-parser": "^5.2.5"
+  }
+}

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Suivi élève</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.3rem; }
+      label { display: block; margin: 0.6rem 0; }
+      input[type='text'] { width: 100%; padding: 0.5rem; font-size: 1rem; }
+      button { padding: 0.5rem 0.9rem; font-size: 1rem; margin-right: 0.5rem; }
+      pre { background: #f4f4f5; padding: 0.8rem; white-space: pre-wrap; word-break: break-word; }
+    </style>
+  </head>
+  <body>
+    <h1>Localisation élève</h1>
+
+    <label
+      >Code élève <input type="text" id="code" placeholder="A123" autocomplete="off" />
+    </label>
+    <label><input type="checkbox" id="simuler" /> Coordonnées simulées (pour tester sans GPS)</label>
+
+    <p><button id="start">Envoyer</button> <button id="stop" disabled>Arrêter</button></p>
+    <pre id="statut">En attente.</pre>
+
+    <script>
+      const INTERVAL_MS = 10000; // 1 position toutes les 10 s
+      const SIM = { lat: 6.3654, lng: 2.4183 }; // Cotonou : meme zone que l'exemple XML
+      const $ = (id) => document.getElementById(id);
+      let timer = null;
+      let tick = 0;
+
+      $('code').value = localStorage.getItem('eleve_code') || '';
+
+      function sendPosition(lat, lng) {
+        const eleve_id = $('code').value.trim();
+        if (!eleve_id) {
+          $('statut').textContent = 'Code élève manquant.';
+          stop();
+          return;
+        }
+        localStorage.setItem('eleve_code', eleve_id);
+
+        // Même origine que la page : le Worker expose /position sur sa propre URL.
+        fetch('/position', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ eleve_id, lat, lng }),
+        })
+          .then(async (res) => {
+            const data = await res.json();
+            $('statut').textContent = res.ok
+              ? `OK — ${eleve_id} -> ${lat.toFixed(4)}, ${lng.toFixed(4)} (${data.date})`
+              : `Erreur ${res.status} : ${data.error}`;
+          })
+          .catch((err) => {
+            $('statut').textContent = 'Envoi impossible : ' + err.message;
+          });
+      }
+
+      function locate() {
+        if ($('simuler').checked) {
+          // Petit cercle synthétique : suffisant pour voir un tracé dans l'admin.
+          tick++;
+          sendPosition(SIM.lat + 0.0009 * Math.sin(tick / 3), SIM.lng + 0.0009 * Math.cos(tick / 3));
+          return;
+        }
+        if (!navigator.geolocation) {
+          $('statut').textContent = 'Géolocalisation indisponible sur ce navigateur.';
+          stop();
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          (pos) => sendPosition(pos.coords.latitude, pos.coords.longitude),
+          (err) => {
+            $('statut').textContent = `Géolocalisation refusée (${err.message}) — coche "simulées" pour continuer la démo.`;
+          },
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 },
+        );
+      }
+
+      function start() {
+        if (timer) return;
+        locate(); // premier envoi immédiat, puis un toutes les INTERVAL_MS
+        timer = setInterval(locate, INTERVAL_MS);
+        $('stop').disabled = false;
+      }
+
+      function stop() {
+        clearInterval(timer);
+        timer = null;
+        $('stop').disabled = true;
+      }
+
+      $('start').onclick = start;
+      $('stop').onclick = stop;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+# Worker de localisation — démo.
+# Prérequis : wrangler >= 3.83 (les assets statiques cohabitent avec le script).
+name = "school-tracking-worker"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+# Les pages élève et admin sont des assets statiques : public/eleve.html et
+# public/admin.html, accessibles via env.ASSETS.
+assets = { directory = "public", binding = "ASSETS" }
+
+[[d1_databases]]
+binding = "DB"
+database_name = "school-tracking"
+# Identifiant de la base D1 « school-tracking » (créée via le MCP Cloudflare).
+database_id = "42477da5-7d97-4b89-ac8b-c843e7ab9bfa"
+
+[vars]
+# Clé partagée exigée en en-tête x-api-key pour lire les positions (démo uniquement).
+# En vrai : npx wrangler secret put API_KEY
+API_KEY = "cle-de-demo-changez-moi"

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin — localisation scolaire</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; display: flex; min-height: 100vh; }
+      aside { width: 23rem; padding: 1rem; box-sizing: border-box; border-right: 1px solid #e4e4e7; }
+      section { margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px dashed #d4d4d8; }
+      h1 { font-size: 1.1rem; margin: 0 0 0.25rem; }
+      h2 { font-size: 0.85rem; margin: 0 0 0.4rem; text-transform: uppercase; color: #52525b; }
+      p.lien { font-size: 0.85rem; margin: 0 0 0.75rem; }
+      label { display: block; font-size: 0.85rem; margin: 0.4rem 0; }
+      select { width: 100%; padding: 0.4rem; font-size: 0.9rem; box-sizing: border-box; }
+      button { padding: 0.4rem 0.7rem; font-size: 0.85rem; margin: 0.25rem 0.25rem 0 0; }
+      pre { background: #f4f4f5; padding: 0.6rem; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }
+      #map { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>Administration</h1>
+      <p class="lien">Page élève : <a href="/">ouvrir le partage de position</a></p>
+
+      <section>
+        <h2>Élèves (XML)</h2>
+        <input type="file" id="file" accept=".xml,text/xml,application/xml" />
+        <button id="importer">Importer le XML</button>
+        <button id="exporter">Exporter le XML</button>
+        <pre id="nbEleves">0 élève(s).</pre>
+        <pre id="xmlInfo">Aucun import.</pre>
+      </section>
+
+      <section>
+        <h2>Suivi</h2>
+        <label>Élève <select id="eleve"></select> </label>
+        <label><input type="checkbox" id="auto" checked /> Rafraîchir toutes les 5 s</label>
+        <label><input type="checkbox" id="fit" checked /> Cadrer la carte sur la trace</label>
+        <button id="refresh">Actualiser</button>
+        <pre id="info">Sélectionne un élève.</pre>
+      </section>
+    </aside>
+
+    <div id="map"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      // Page pré-configurée : même origine que l'API, clé démo intégrée (démo uniquement).
+      const API_KEY = 'cle-de-demo-changez-moi';
+      const REFRESH_MS = 5000;
+      const $ = (id) => document.getElementById(id);
+      let eleves = [];
+      let timer = null;
+      let busy = false; // évite d'empiler les rafraîchissements si le Worker répond lentement
+      let marker = null;
+      let ligne = null;
+
+      // Carte Leaflet + tuiles OpenStreetMap (nécessite l'accès internet).
+      const map = L.map('map').setView([6.3654, 2.4183], 14);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+      // ------------------------------------------------------------- élèves ---
+
+      async function loadEleves() {
+        const res = await fetch('/api/eleves');
+        if (!res.ok) throw new Error(`API indisponible (${res.status})`);
+        eleves = await res.json();
+
+        const sel = $('eleve');
+        const garde = sel.value;
+        sel.innerHTML = '';
+        for (const e of eleves) {
+          const opt = document.createElement('option');
+          opt.value = e.code; // les positions sont indexées par le code saisi par l'élève, pas par l'id
+          opt.textContent = `${e.nom} — ${e.classe} (code ${e.code})`;
+          sel.appendChild(opt);
+        }
+        sel.value = eleves.some((e) => e.code === garde) ? garde : (eleves[0]?.code ?? '');
+        $('nbEleves').textContent = `${eleves.length} élève(s).`;
+      }
+
+      // -------------------------------------------------------- import/export ---
+
+      $('importer').onclick = async () => {
+        const f = $('file').files[0];
+        if (!f) {
+          $('xmlInfo').textContent = "Choisis d'abord un fichier .xml.";
+          return;
+        }
+        try {
+          // Le fichier est posté tel quel en corps brut : c'est POST /import-xml qui le parse.
+          const res = await fetch('/import-xml', {
+            method: 'POST',
+            headers: { 'content-type': f.type || 'text/xml' },
+            body: await f.text(),
+          });
+          const data = await res.json();
+          $('xmlInfo').textContent = res.ok
+            ? `Import OK : ${data.importes} élève(s)${data.ignores.length ? ` — ignoré(s) : ${data.ignores.join(', ')}` : ''}`
+            : `Import refusé : ${data.error}`;
+          await loadEleves();
+          refresh();
+        } catch (err) {
+          $('xmlInfo').textContent = 'Import impossible : ' + err.message;
+        }
+      };
+
+      $('exporter').onclick = async () => {
+        try {
+          const res = await fetch('/export-xml');
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `export refusé (${res.status})`);
+          }
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(await res.blob());
+          a.download = 'eleves.xml';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          $('xmlInfo').textContent = 'Export OK : eleves.xml téléchargé.';
+        } catch (err) {
+          $('xmlInfo').textContent = 'Export impossible : ' + err.message;
+        }
+      };
+
+      // ---------------------------------------------- positions XML (DOMParser) ---
+
+      async function fetchWorkerXml(path) {
+        const res = await fetch(`${path}?format=xml`, { headers: { 'x-api-key': API_KEY } });
+        const body = await res.text();
+        const doc = new DOMParser().parseFromString(body, 'application/xml');
+        if (doc.querySelector('parsererror')) throw new Error('XML illisible');
+        if (!res.ok) throw new Error(doc.querySelector('erreur')?.textContent || `HTTP ${res.status}`);
+        return doc;
+      }
+
+      const num = (node) => Number(node?.textContent);
+      // <position eleve="1" vide="1"/> => position inconnue.
+      const readPosition = (doc) =>
+        doc.documentElement.getAttribute('vide') ? null : { lat: num(doc.querySelector('lat')), lng: num(doc.querySelector('lng')), date: doc.querySelector('date')?.textContent };
+      const readTrace = (doc) =>
+        [...doc.querySelectorAll('position')]
+          .map((p) => ({ lat: num(p.querySelector('lat')), lng: num(p.querySelector('lng')), date: p.querySelector('date')?.textContent }))
+          .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+
+      // ------------------------------------------------------------ affichage ---
+
+      function clearLayers() {
+        if (marker) map.removeLayer(marker);
+        if (ligne) map.removeLayer(ligne);
+        marker = null;
+        ligne = null;
+      }
+
+      async function refresh() {
+        const code = $('eleve').value;
+        if (!code) {
+          $('info').textContent = 'Aucun élève : importe le fichier eleves.xml ci-dessus.';
+          return;
+        }
+        if (busy) return;
+        busy = true;
+        const e = eleves.find((s) => s.code === code) || {};
+        const q = encodeURIComponent(code);
+        try {
+          const [posDoc, traceDoc] = await Promise.all([fetchWorkerXml(`/position/${q}`), fetchWorkerXml(`/trace/${q}`)]);
+          const pos = readPosition(posDoc);
+          const pts = readTrace(traceDoc);
+
+          clearLayers();
+          if (pos) {
+            marker = L.marker([pos.lat, pos.lng]).addTo(map).bindPopup(`Dernière position<br>${pos.date}`);
+            ligne = L.polyline(pts.map((p) => [p.lat, p.lng]), { color: '#2563eb' }).addTo(map);
+            if ($('fit').checked && pts.length > 1) map.fitBounds(ligne.getBounds(), { padding: [30, 30] });
+            else if (pts.length === 1) map.setView([pts[0].lat, pts[0].lng], 15);
+          }
+          $('info').textContent = [
+            `${e.nom || '(inconnu)'} · ${e.classe || '-'} · code ${code}`,
+            pos ? `Dernière position : ${pos.lat.toFixed(5)}, ${pos.lng.toFixed(5)}` : 'Aucune position connue.',
+            `Trace : ${pts.length} point(s)${pts.length ? ` — ${pts[0].date}` : ''}`,
+            `Vu à ${new Date().toLocaleTimeString()}`,
+          ].join('\n');
+        } catch (err) {
+          $('info').textContent = `Erreur : ${err.message}`;
+        } finally {
+          busy = false;
+        }
+      }
+
+      function setAuto(on) {
+        clearInterval(timer);
+        timer = on ? setInterval(refresh, REFRESH_MS) : null;
+      }
+
+      $('eleve').onchange = () => {
+        clearLayers();
+        $('fit').checked = true;
+        refresh();
+      };
+      $('auto').onchange = (ev) => setAuto(ev.target.checked);
+      $('refresh').onclick = refresh;
+
+      (async () => {
+        try {
+          await loadEleves();
+        } catch (err) {
+          $('xmlInfo').textContent = err.message;
+        }
+        refresh();
+        setAuto($('auto').checked);
+      })();
+    </script>
+  </body>
+</html>
